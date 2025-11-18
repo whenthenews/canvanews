@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Photobooth</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        /* Custom styles and animations */
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* Base screen styles for transitions */
+        .screen {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            transition: opacity 0.5s ease-in-out;
+        }
+        
+        /* Hide screens by default */
+        .screen:not(.visible) {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        /* Flash animation */
+        #flash-overlay {
+            position: fixed;
+            inset: 0;
+            background-color: white;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 999;
+        }
+        #flash-overlay.flash {
+            animation: flash-animation 0.3s ease-out;
+        }
+        @keyframes flash-animation {
+            0% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+
+        /* Mirror the video preview */
+        #video-preview {
+            transform: scaleX(-1);
+        }
+
+        /* Custom button style */
+        .btn {
+            @apply bg-blue-600 text-white font-bold py-3 px-8 rounded-lg shadow-lg transition-all duration-300 ease-in-out transform hover:scale-105 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed;
+        }
+        .btn-secondary {
+            @apply bg-gray-700 text-white font-medium py-2 px-5 rounded-lg shadow-md transition-all duration-300 ease-in-out transform hover:scale-105 hover:bg-gray-800;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white h-screen w-screen overflow-hidden m-0 p-0">
+
+    <!-- Main App Container -->
+    <div id="app" class="relative h-full w-full">
+
+        <!-- Screen 0: Start / Permissions -->
+        <div id="start-screen" class="screen visible text-center">
+            <h1 class="text-6xl font-extrabold mb-6 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">Photobooth</h1>
+            <p class="text-xl text-gray-300 mb-10">Click start to launch the photobooth and allow camera access.</p>
+            <button id="start-button" class="btn text-2xl px-10 py-4">Start</button>
+        </div>
+
+        <!-- Screen 1: Camera Select -->
+        <div id="camera-select-screen" class="screen">
+            <h1 class="text-5xl font-bold mb-2">Welcome to the photobooth</h1>
+            <div class="w-full max-w-3xl h-1 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full mb-6"></div>
+            
+            <video id="video-preview" class="w-full max-w-3xl aspect-video rounded-xl shadow-2xl bg-gray-800 mb-4" autoplay playsinline></video>
+            
+            <h3 id="camera-name-label" class="text-2xl font-semibold mb-4">Select a camera angle</h3>
+
+            <div class="flex space-x-4">
+                <button id="switch-camera-button" class="btn-secondary">Switch Camera</button>
+                <button id="next-from-camera-button" class="btn">Next</button>
+            </div>
+        </div>
+
+        <!-- Screen 2: Photo Count Select -->
+        <div id="count-select-screen" class="screen">
+            <h1 class="text-5xl font-bold mb-6">Welcome to the photobooth</h1>
+            <h3 class="text-3xl font-semibold mb-8">How many photos would you like?</h3>
+            <div class="flex space-x-4">
+                <button class="btn text-2xl photo-count-button" data-count="1">1 Photo</button>
+                <button class="btn text-2xl photo-count-button" data-count="3">3 Photos</button>
+                <button class="btn text-2xl photo-count-button" data-count="5">5 Photos</button>
+            </div>
+        </div>
+
+        <!-- Screen 3: Countdown (Overlay) -->
+        <div id="countdown-screen" class="screen bg-black bg-opacity-50">
+            <div id="countdown-text" class="text-9xl font-extrabold text-white" style="text-shadow: 0 0 20px rgba(0,0,0,0.5);"></div>
+        </div>
+        
+        <!-- Screen 4: Processing / End -->
+        <div id="end-screen" class="screen text-center">
+            <h1 class="text-5xl font-bold mb-6">All Done!</h1>
+            <p class="text-2xl text-gray-300 mb-8">Your photos are downloading.</p>
+            <p class="text-lg text-gray-400">The photobooth will restart shortly.</p>
+        </div>
+
+    </div>
+
+    <!-- Flash Overlay -->
+    <div id="flash-overlay"></div>
+
+    <!-- Hidden canvas for capturing photos -->
+    <canvas id="photo-canvas" class="hidden"></canvas>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- UI Elements ---
+            const screens = {
+                start: document.getElementById('start-screen'),
+                cameraSelect: document.getElementById('camera-select-screen'),
+                countSelect: document.getElementById('count-select-screen'),
+                countdown: document.getElementById('countdown-screen'),
+                end: document.getElementById('end-screen'),
+            };
+            const startButton = document.getElementById('start-button');
+            const videoPreview = document.getElementById('video-preview');
+            const cameraNameLabel = document.getElementById('camera-name-label');
+            const switchCameraButton = document.getElementById('switch-camera-button');
+            const nextFromCameraButton = document.getElementById('next-from-camera-button');
+            const countButtons = document.querySelectorAll('.photo-count-button');
+            const countdownText = document.getElementById('countdown-text');
+            const flashOverlay = document.getElementById('flash-overlay');
+            const photoCanvas = document.getElementById('photo-canvas');
+
+            // --- State ---
+            let iriunDeviceId = null;
+            let droidCamDeviceId = null;
+            let currentCameraIsIriun = true; // Flag to track which camera is active
+            let selectedStream = null;
+            let photosToTake = 0;
+            let photosTaken = [];
+
+            // --- Audio Player ---
+            function playAudio(src) {
+                // We create a new audio object each time to allow for overlapping sounds (like countdown beeps)
+                // This assumes the audio files are in the SAME folder as this HTML file.
+                const audio = new Audio(src);
+                audio.play().catch(err => {
+                    // Log errors but don't stop the app. 
+                    // This might happen if user interaction hasn't happened yet.
+                    console.warn(`Audio play failed for ${src}:`, err.message);
+                });
+            }
+
+            // --- Screen Management ---
+            function showScreen(screenName) {
+                Object.values(screens).forEach(screen => screen.classList.remove('visible'));
+                if (screens[screenName]) {
+                    screens[screenName].classList.add('visible');
+                }
+            }
+
+            // --- Camera Logic ---
+            async function getCameras() {
+                try {
+                    // Get permissions first
+                    selectedStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                    
+                    // Enumerate devices
+                    const devices = await navigator.mediaDevices.enumerateDevices();
+                    const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                    
+                    if (videoDevices.length === 0) {
+                        cameraNameLabel.textContent = "No cameras found.";
+                        switchCameraButton.disabled = true;
+                        nextFromCameraButton.disabled = true;
+                        return;
+                    }
+
+                    // Find the specific cameras by name
+                    for (const device of videoDevices) {
+                        const label = device.label.toLowerCase();
+                        if (label.includes('iriun')) {
+                            iriunDeviceId = device.deviceId;
+                        }
+                        if (label.includes('droidcam')) {
+                            droidCamDeviceId = device.deviceId;
+                        }
+                    }
+
+                    // Handle cases where cameras aren't found
+                    if (!iriunDeviceId && !droidCamDeviceId) {
+                        // Neither found, use first two devices as fallback
+                        cameraNameLabel.textContent = "Could not find 'Iriun' or 'DroidCam'. Using defaults.";
+                        if (videoDevices.length > 0) iriunDeviceId = videoDevices[0].deviceId;
+                        if (videoDevices.length > 1) droidCamDeviceId = videoDevices[1].deviceId;
+                        else switchCameraButton.disabled = true; // Only one default device
+                    } else if (!iriunDeviceId) {
+                        // DroidCam found, Iriun missing. Use first available as Iriun.
+                        cameraNameLabel.textContent = "DroidCam found, Iriun missing. Using default for Iriun.";
+                        iriunDeviceId = videoDevices.find(d => d.deviceId !== droidCamDeviceId)?.deviceId || null;
+                    } else if (!droidCamDeviceId) {
+                        // Iriun found, DroidCam missing. Use first available as DroidCam.
+                        cameraNameLabel.textContent = "Iriun found, DroidCam missing. Using default for DroidCam.";
+                        droidCamDeviceId = videoDevices.find(d => d.deviceId !== iriunDeviceId)?.deviceId || null;
+                    }
+                    
+                    if (!iriunDeviceId) {
+                         // Still no Iriun (maybe only DroidCam exists)
+                         if(droidCamDeviceId) {
+                            cameraNameLabel.textContent = "Only DroidCam found.";
+                            iriunDeviceId = droidCamDeviceId; // Make them the same
+                            switchCameraButton.disabled = true;
+                         } else {
+                            cameraNameLabel.textContent = "No usable cameras found.";
+                            switchCameraButton.disabled = true;
+                            nextFromCameraButton.disabled = true;
+                            return;
+                         }
+                    }
+                    
+                    if (!droidCamDeviceId) {
+                        // Only Iriun exists
+                        cameraNameLabel.textContent = "Only Iriun found.";
+                        droidCamDeviceId = iriunDeviceId; // Make them the same
+                        switchCameraButton.disabled = true;
+                    }
+
+                    // Start with Iriun by default
+                    currentCameraIsIriun = true;
+                    startStream(iriunDeviceId, "Iriun Webcam");
+
+                } catch (err) {
+                    console.error("Error accessing camera:", err);
+                    cameraNameLabel.textContent = "Camera access denied. Please refresh and allow.";
+                    startButton.textContent = "Please refresh and allow camera";
+                    startButton.disabled = true;
+                }
+            }
+
+            async function startStream(deviceId, label) {
+                if (selectedStream) {
+                    selectedStream.getTracks().forEach(track => track.stop());
+                }
+
+                if (!deviceId) {
+                    console.error("No Device ID provided to startStream");
+                    cameraNameLabel.textContent = "Error: No camera device ID.";
+                    return;
+                }
+
+                try {
+                    selectedStream = await navigator.mediaDevices.getUserMedia({
+                        video: { deviceId: { exact: deviceId } },
+                        audio: false
+                    });
+                    videoPreview.srcObject = selectedStream;
+                    videoPreview.play();
+                    
+                    // Set label
+                    cameraNameLabel.textContent = label;
+
+                } catch (err) {
+                    console.error(`Error starting stream for ${label}:`, err);
+                    cameraNameLabel.textContent = `Error switching to ${label}.`;
+                }
+            }
+
+            function switchCamera() {
+                if (switchCameraButton.disabled) return;
+
+                if (!iriunDeviceId || !droidCamDeviceId) {
+                    console.warn("Switching disabled, one or more cameras not found.");
+                    return; // Should be handled by disabled state, but good to check
+                }
+
+                if (currentCameraIsIriun) {
+                    // Switch to DroidCam
+                    startStream(droidCamDeviceId, "DroidCam Video");
+                    currentCameraIsIriun = false;
+                } else {
+                    // Switch to Iriun
+                    startStream(iriunDeviceId, "Iriun Webcam");
+                    currentCameraIsIriun = true;
+                }
+                playAudio('camerachange.mp3');
+            }
+
+            // --- Photo Taking Logic ---
+            async function startPhotoSession(count) {
+                photosToTake = count;
+                photosTaken = [];
+                showScreen('countdown');
+                // Hide video from main screen to avoid double-video
+                screens.cameraSelect.classList.remove('visible'); 
+
+                for (let i = 0; i < photosToTake; i++) {
+                    await takePhoto();
+                }
+
+                finishSession();
+            }
+
+            function takePhoto() {
+                return new Promise(resolve => {
+                    let count = 7;
+                    countdownText.textContent = count;
+                    playAudio('taking.mp3'); // Countdown sound
+
+                    const interval = setInterval(() => {
+                        count--;
+                        if (count > 0) {
+                            countdownText.textContent = count;
+                            playAudio('taking.mp3'); // Countdown sound
+                        } else {
+                            clearInterval(interval);
+                            countdownText.textContent = "SMILE!";
+                            
+                            setTimeout(() => {
+                                // Shutter sound (using 'taking.mp3' as it's the only one specified for this part)
+                                playAudio('taking.mp3');
+                                
+                                // Flash
+                                flashOverlay.classList.add('flash');
+                                
+                                // Capture
+                                const context = photoCanvas.getContext('2d');
+                                photoCanvas.width = videoPreview.videoWidth;
+                                photoCanvas.height = videoPreview.videoHeight;
+                                // Draw mirrored image
+                                context.translate(photoCanvas.width, 0);
+                                context.scale(-1, 1);
+                                context.drawImage(videoPreview, 0, 0, photoCanvas.width, photoCanvas.height);
+                                
+                                // Save image data
+                                photosTaken.push(photoCanvas.toDataURL('image/jpeg', 0.9));
+
+                                // Remove flash and resolve
+                                setTimeout(() => {
+                                    flashOverlay.classList.remove('flash');
+                                    countdownText.textContent = "";
+                                    resolve();
+                                }, 500); // 500ms pause after photo
+                            }, 1000); // 1 sec on "SMILE!"
+                        }
+                    }, 1000);
+                });
+            }
+
+            function finishSession() {
+                playAudio('end.mp3');
+                showScreen('end');
+
+                // Stop camera
+                if (selectedStream) {
+                    selectedStream.getTracks().forEach(track => track.stop());
+                }
+
+                // Download photos
+                photosTaken.forEach((dataUrl, index) => {
+                    const link = document.createElement('a');
+                    link.href = dataUrl;
+                    link.download = `photobooth_photo_${index + 1}.jpg`;
+                    document.body.appendChild(link);
+                    // Stagger downloads slightly
+                    setTimeout(() => {
+                        link.click();
+                        document.body.removeChild(link);
+                    }, index * 300);
+                });
+
+                // Restart app
+                setTimeout(() => {
+                    window.location.reload();
+                }, 5000);
+            }
+
+            // --- Event Listeners ---
+            startButton.addEventListener('click', async () => {
+                // Request fullscreen
+                document.documentElement.requestFullscreen().catch(err => {
+                    console.warn("Fullscreen request failed:", err.message);
+                });
+                
+                // Audio now needs to be unlocked by user interaction, which this click does.
+                
+                // Get cameras
+                await getCameras();
+                
+                // Go to next screen
+                showScreen('cameraSelect');
+                playAudio('welcome.mp3');
+            });
+
+            switchCameraButton.addEventListener('click', switchCamera);
+
+            nextFromCameraButton.addEventListener('click', () => {
+                showScreen('countSelect');
+                playAudio('photos.mp3');
+            });
+
+            countButtons.forEach(button => {
+                button.addEventListener('click', () => {
+                    const count = parseInt(button.dataset.count, 10);
+                    startPhotoSession(count);
+                });
+            });
+
+        });
+    </script>
+</body>
+</html>
